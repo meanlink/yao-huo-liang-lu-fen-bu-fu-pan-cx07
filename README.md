@@ -29,11 +29,19 @@ Python 3.12 / FastAPI / SQLAlchemy / NumPy / SciPy / scikit-learn；PostgreSQL 1
 ## 目录与工程约定
 backend/src/{models,schemas,services,routes,controllers,middlewares,constants,config,utils}；backend/scripts/seed_demo.py；backend/migrations/initial.py。
 frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,constants}。
-Role 枚举：admin/analyst/viewer；JobStatus：queued/running/completed/failed。后端 backend/src/constants/enums.py，前端 frontend/src/constants/enums.js；路由权限在 middlewares/auth.py；页面按相同角色控制操作入口。
+Role 枚举：admin/analyst/viewer；JobStatus：queued/running/completed/failed；AttemptStatus：running/succeeded/failed/taken_over。后端 backend/src/constants/enums.py，前端 frontend/src/constants/enums.js；路由权限在 middlewares/auth.py；页面按相同角色控制操作入口。
+
+## 多计算进程并发调度
+可同时运行多个 worker（`docker compose up -d --scale worker=3`，或多次 `python -m src.worker`），通过数据库协同而非 Redis 队列去重：
+- 原子领取：`scheduler.claim_next` 用条件 UPDATE 抢占，同一复盘同一时刻只被一个 worker 执行；Redis 仅作唤醒通知，SQL 排队状态是权威兜底。
+- 心跳租约：执行中每 5 秒续租（`HEARTBEAT_INTERVAL`），持续心跳的任务不被抢；失联超过 30 秒（`LEASE_TIMEOUT`）才可被其他 worker 接管，启动新 worker 不再打断仍在运行的进程。
+- Fencing 令牌：每次领取递增 `attempt_no` 并写 `job_attempts`；旧执行迟回的成功/失败因令牌不匹配被丢弃，不覆盖接管结果。
+- 失败重试：失败后在原任务上 `POST /jobs/{id}/retry` 回到排队，连续点击幂等不重复排队；每次尝试（首次排队/失败重试/失联接管）及原因、错误均保留在 attempts。
+- 结果门槛：仅 `completed` 且有结果（有效执行发布）才能批准；批准与定时简报只使用有效结果。多 worker 下到期简报也经原子领取，只投递一次。
 
 ## 环境变量与 Docker
 COMPOSE_PROJECT_NAME=kiln-yield；FRONTEND_PORT=18200；BACKEND_PORT=19200；DB_PORT=17700；DB_PASSWORD、JWT_SECRET 见 .env.example；SEED_DEMO 默认 true。共享命名产物卷供后端下载与 worker 写入，数据库/Redis 各持久卷。
-恰好五服务均有健康检查。Redis 队列加 SQL 排队状态兜底；worker 按 next_run 生成本地收件箱文件。周期 60 秒至 30 天。分发结果为批准分析的固定快照；若需新数据重新计算并建立新计划。当前不连接邮件或企业聊天。
+恰好五服务均有健康检查（worker 可水平扩容为多副本）。Redis 仅作唤醒通知，数据库原子领取 + 心跳租约才是排队与去重的权威；worker 按 next_run 原子领取并生成本地收件箱文件，多副本不会重复投递。周期 60 秒至 30 天。分发结果为批准分析的固定快照；若需新数据重新计算并建立新计划。当前不连接邮件或企业聊天。
 错误响应、请求编号、Redis 每 IP 每分钟 240 次限流、JWT 和数据库操作审计。演示密钥与密码仅供本机模拟；生产部署前配置独立密钥与账号。
 
 ## 数据与验收

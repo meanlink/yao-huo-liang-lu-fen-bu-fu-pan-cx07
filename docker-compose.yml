@@ -46,7 +46,8 @@ services:
       start_period: 15s
   worker:
     build: ./backend
-    container_name: ${COMPOSE_PROJECT_NAME:-kiln-yield}-worker
+    # 不固定 container_name，便于水平扩容：docker compose up -d --scale worker=3
+    # 多 worker 通过数据库原子领取 + 心跳租约协同，同一复盘不会被重复执行
     command: ["python", "-m", "src.worker"]
     environment: *app-env
     volumes: ["analysis-artifacts:/artifacts"]

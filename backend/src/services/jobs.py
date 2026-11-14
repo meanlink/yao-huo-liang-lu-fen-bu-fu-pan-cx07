@@ -20,11 +20,24 @@ def create(db, data, user):
             except (ValueError,TypeError): raise HTTPException(422, f'{p["label"]} 超出范围或非数值')
         elif str(v) not in [str(o['value']) for o in p.get('options',[])]:
             raise HTTPException(422,f'{p["label"]} 不是有效选项')
-    j=Job(name=data.name, dataset_id=data.dataset_id, params=params, created_by=user.id, created_at=time.time(), status='queued')
+    now=time.time()
+    j=Job(name=data.name, dataset_id=data.dataset_id, params=params, created_by=user.id,
+          created_at=now, status='queued', attempt_no=0, queued_at=now)
     db.add(j); db.flush()
+    return j
+def retry(db, job_id):
+    """失败后在原任务上重试；排队/执行中的重复点击幂等，不重复排队。"""
+    j=db.get(Job,job_id)
+    if not j: raise HTTPException(404,'分析任务不存在')
+    if j.status=='completed': raise HTTPException(409,'已完成的任务无需重试')
+    if j.status in ('queued','running'):
+        return j  # 已有有效尝试在排队或执行，连续点击不产生新队列
+    # failed -> 回到排队，保留历史 attempts，不清空错误直到下一次尝试结束
+    now=time.time()
+    j.status='queued'; j.worker_id=None; j.heartbeat_at=None; j.queued_at=now
     return j
 def enqueue(job_id):
     try:
         r=Redis.from_url(REDIS_URL); r.rpush('analysis:queue',job_id); r.close()
     except Exception:
-        pass # SQL queued status is the durable fallback
+        pass # Redis 仅作唤醒通知，数据库排队状态才是权威兜底
